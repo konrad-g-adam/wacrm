@@ -1,0 +1,61 @@
+# wacrm on the CFG VPS behind the existing Traefik (network: traefik-proxy,
+# resolver: letsencrypt, entrypoint: websecure). Lives at /docker/wacrm/ on
+# the VPS next to a .env file (template: wacrm.env.example).
+#
+#   cd /docker/wacrm
+#   docker compose -f docker-compose.wacrm.yml --env-file .env up -d --build
+#
+# Rate limiting (G0 hardening note #1) is enforced HERE at Traefik:
+#   - global: 30 req/s average, burst 60 per source IP
+#   - the app itself has no limiter; do not expose port 3000 publicly.
+
+services:
+  wacrm:
+    build:
+      context: https://github.com/konrad-g-adam/wacrm.git#cfg/g2-hardening
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_SITE_URL: https://${WACRM_HOST}
+    container_name: wacrm
+    restart: unless-stopped
+    environment:
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      META_APP_SECRET: ${META_APP_SECRET}
+      META_APP_ID: ${META_APP_ID}
+      AUTOMATION_CRON_SECRET: ${AUTOMATION_CRON_SECRET}
+      NEXT_PUBLIC_SITE_URL: https://${WACRM_HOST}
+      ALLOWED_INVITE_HOSTS: ${WACRM_HOST}
+    networks: [traefik-proxy]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.wacrm.rule=Host(`${WACRM_HOST}`)
+      - traefik.http.routers.wacrm.entrypoints=websecure
+      - traefik.http.routers.wacrm.tls.certresolver=letsencrypt
+      - traefik.http.services.wacrm.loadbalancer.server.port=3000
+      # Rate limit per client IP (Meta webhook bursts fit well under this).
+      - traefik.http.middlewares.wacrm-ratelimit.ratelimit.average=30
+      - traefik.http.middlewares.wacrm-ratelimit.ratelimit.burst=60
+      - traefik.http.routers.wacrm.middlewares=wacrm-ratelimit@docker
+
+  # Cron pinger for automation Wait-steps (drains pending executions
+  # every minute; endpoint is 503-fail-closed without the secret).
+  wacrm-cron:
+    image: alpine:3.20
+    container_name: wacrm-cron
+    restart: unless-stopped
+    depends_on: [wacrm]
+    networks: [traefik-proxy]
+    environment:
+      AUTOMATION_CRON_SECRET: ${AUTOMATION_CRON_SECRET}
+    command: >
+      /bin/sh -c "apk add --no-cache curl >/dev/null &&
+      while true; do
+        curl -s -o /dev/null -H \"x-cron-secret: $$AUTOMATION_CRON_SECRET\" http://wacrm:3000/api/automations/cron;
+        sleep 60;
+      done"
+
+networks:
+  traefik-proxy:
+    external: true
