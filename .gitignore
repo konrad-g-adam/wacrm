@@ -43,3 +43,6 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 dev.log
+
+# Claude Code session state (contains captured conversation incl. secrets - never commit)
+.claude/
