@@ -1,13 +1,22 @@
 /**
  * Zapis sprzeciwu do KANONICZNEJ listy wykluczen lejka reaktywacyjnego AMP.
  *
- * DLACZEGO TO PISZE DO INNEGO PROJEKTU SUPABASE:
+ * DLACZEGO W OGOLE WYCHODZIMY POZA WLASNA BAZE:
  * wacrm ma wlasna baze (paspnksnzqkdnglzjxxg). Tabela `suppression_list`
  * zyje w bazie kalkulatora, razem z `reactivation_leads`. § 8 ust. 3 umowy
  * powierzenia wymaga zaprzestania komunikacji WE WSZYSTKICH KANALACH
  * natychmiast. Gdyby sprzeciw z WhatsAppa ladowal tylko w bazie wacrm, ta
  * sama osoba dalej dostalaby fale SMS i dalej siedzialaby w Meta Custom
  * Audience. Obowiazek jest miedzykanalowy, wiec lista musi byc jedna.
+ *
+ * DLACZEGO PRZEZ ENDPOINT, A NIE KLUCZEM DO BAZY:
+ * klucz service_role omija RLS. Wydanie go tutaj daloby wacrm-owi pelny
+ * odczyt i zapis na danych leadow (reactivation_leads), rezerwacjach i
+ * reszcie bazy kalkulatora - wszystko po to, by zrobic JEDEN insert.
+ * Zamiast tego wolamy waski endpoint POST /api/suppression, ktory umie
+ * wylacznie te jedna operacje. wacrm trzyma jednorazowy sekret, a nie
+ * poswiadczenia bazy. Przy kompromitacji wacrm promien razenia to
+ * "moze dopisac sprzeciw", a nie "czyta baze leadow".
  *
  * UWAGA NA ARCHITEKTURE WEBHOOKA: route.ts oddaje Meta 200 natychmiast
  * i przetwarza w `after()`, ktorego catch polyka kazdy wyjatek. Meta NIE
@@ -20,25 +29,16 @@
  * bezpieczne.
  */
 
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-
 /** Powody dozwolone przez suppression_list_reason_check. */
 export type SuppressionReason =
   'stop' | 'odmowa' | 'wycofanie_zgody' | 'zadanie_usuniecia' | 'inne';
 
-let _client: SupabaseClient | null = null;
-
-/**
- * Klient bazy kalkulatora. Osobne zmienne srodowiskowe, celowo nie
- * wspoldzielone z NEXT_PUBLIC_SUPABASE_URL - to inny projekt i inny
- * service role key.
- */
-function suppressionDb(): SupabaseClient | null {
-  const url = process.env.SUPPRESSION_SUPABASE_URL;
-  const key = process.env.SUPPRESSION_SUPABASE_SERVICE_KEY;
-  if (!url || !key) return null;
-  if (!_client) _client = createClient(url, key);
-  return _client;
+/** Adres endpointu przyjmujacego sprzeciwy + sekret. Bez nich nie ma zapisu. */
+function ingestConfig(): { url: string; secret: string } | null {
+  const url = process.env.SUPPRESSION_INGEST_URL;
+  const secret = process.env.SUPPRESSION_INGEST_SECRET;
+  if (!url || !secret) return null;
+  return { url, secret };
 }
 
 /**
@@ -123,10 +123,10 @@ export async function recordOptOut(params: {
   reason?: SuppressionReason;
   note?: string;
 }): Promise<{ recorded: boolean; phone: string }> {
-  const db = suppressionDb();
-  if (!db) {
+  const cfg = ingestConfig();
+  if (!cfg) {
     throw new Error(
-      'suppression: brak SUPPRESSION_SUPABASE_URL / SUPPRESSION_SUPABASE_SERVICE_KEY - ' +
+      'suppression: brak SUPPRESSION_INGEST_URL / SUPPRESSION_INGEST_SECRET - ' +
         'nie mam gdzie zapisac sprzeciwu, a zignorowanie go jest niedopuszczalne'
     );
   }
@@ -138,30 +138,51 @@ export async function recordOptOut(params: {
     );
   }
 
-  // 3 proby z narastajaca przerwa. Sprzeciwu nie wolno zgubic przez
-  // chwilowy timeout sieci miedzy VPS a projektem kalkulatora.
+  // 3 proby z narastajaca przerwa. Sprzeciwu nie wolno zgubic przez chwilowy
+  // timeout sieci miedzy VPS a Vercelem. Endpoint jest idempotentny
+  // (UNIQUE phone_e164 + ignore-duplicates), wiec ponowienie nic nie psuje.
+  //
+  // 401/403 NIE ponawiamy - zly sekret nie naprawi sie sam, a trzy strzaly
+  // tylko opoznia zapis do logu, ktory jest teraz jedynym sladem sprzeciwu.
   let lastError = '';
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const { error } = await db.from('suppression_list').upsert(
-      {
-        phone_e164: phone,
-        reason: params.reason ?? 'stop',
-        channel: params.channel ?? 'whatsapp',
-        note: params.note ?? null,
-      },
-      { onConflict: 'phone_e164', ignoreDuplicates: true }
-    );
+    try {
+      const response = await fetch(cfg.url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${cfg.secret}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone,
+          reason: params.reason ?? 'stop',
+          channel: params.channel ?? 'whatsapp',
+          note: params.note ?? null,
+        }),
+        signal: AbortSignal.timeout(10_000),
+      });
 
-    if (!error) {
-      console.info(
-        `[suppression] zapisano sprzeciw ${maskPhone(phone)} (${params.channel ?? 'whatsapp'}, proba ${attempt})`
-      );
-      return { recorded: true, phone };
+      if (response.ok) {
+        console.info(
+          `[suppression] zapisano sprzeciw ${maskPhone(phone)} (${params.channel ?? 'whatsapp'}, proba ${attempt})`
+        );
+        return { recorded: true, phone };
+      }
+
+      lastError = `HTTP ${response.status}`;
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(
+          `suppression: endpoint odrzucil sekret (${lastError}) - ponawianie nie pomoze`
+        );
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('suppression:'))
+        throw error;
+      lastError = error instanceof Error ? error.message : String(error);
     }
 
-    lastError = error.message;
     console.warn(
-      `[suppression] proba ${attempt}/3 nieudana dla ${maskPhone(phone)}: ${error.message}`
+      `[suppression] proba ${attempt}/3 nieudana dla ${maskPhone(phone)}: ${lastError}`
     );
     if (attempt < 3) await new Promise((r) => setTimeout(r, attempt * 500));
   }
