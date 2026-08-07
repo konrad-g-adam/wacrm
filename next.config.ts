@@ -6,10 +6,28 @@ const withNextIntl = createNextIntlPlugin('./src/i18n/request.ts');
 /**
  * Baseline security headers applied to every response.
  *
- * CSP ships as `Content-Security-Policy-Report-Only` so the browser
- * surfaces violations in the console without blocking anything — once
- * we have confidence nothing legit trips it (two deploys, a pass on
- * every route), flip the key to `Content-Security-Policy` to enforce.
+ * CSP is ENFORCED (2026-08-07). It previously shipped as
+ * `Content-Security-Policy-Report-Only` pending "a pass on every route";
+ * that gate was cleared by walking all ten authenticated routes on
+ * production (dashboard, inbox, notifications, contacts, pipelines,
+ * broadcasts, automations, flows, agents, settings) with a
+ * `securitypolicyviolation` listener attached: zero violations. The
+ * listener was validated first by deliberately tripping `connect-src`,
+ * so "no violations" means the policy is clean, not that reporting was
+ * broken.
+ *
+ * Why enforcing matters more here than on a typical app: `@supabase/ssr`
+ * stores the session — access token AND refresh token — in a cookie that
+ * is readable from JavaScript by design (the browser client needs it).
+ * There is therefore no HttpOnly barrier between an injected script and
+ * a durable credential, and this project has no session timebox
+ * available on its Supabase plan. CSP is the control doing that work.
+ *
+ * Known limitation: `script-src` still carries 'unsafe-inline' and
+ * 'unsafe-eval', so enforcement stops exfiltration to foreign origins
+ * (connect-src is 'self' + Supabase only) but does not stop injected
+ * inline script from executing. Nonce-based CSP is the real fix and is
+ * still outstanding.
  *
  * The rest of the headers are straight blocks, safe to enforce today:
  *   - HSTS: only meaningful on HTTPS (no-op on http://localhost).
@@ -36,7 +54,7 @@ const SECURITY_HEADERS = [
     value: 'camera=(), microphone=(self), geolocation=(), payment=(), usb=()',
   },
   {
-    key: 'Content-Security-Policy-Report-Only',
+    key: 'Content-Security-Policy',
     value: [
       "default-src 'self'",
       // Next.js needs 'unsafe-inline' for its inline hydration script
