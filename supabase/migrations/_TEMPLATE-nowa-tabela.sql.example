@@ -1,0 +1,59 @@
+-- =============================================================================
+-- SZABLON: nowa tabela w schemacie public (Supabase, zasada od 30.10.2026)
+-- =============================================================================
+-- Ten plik NIE jest migracja. Rozszerzenie .sql.example sprawia, ze Supabase CLI
+-- go pomija: `supabase db push` / `migration up` biora tylko pliki pasujace do
+-- ^([0-9]+)_(.*)\.sql$ (supabase/cli, pkg/migration/file.go). Skopiuj tresc do
+-- nowego pliku (np. `supabase migration new nazwa`) i podmien `nowa_tabela`.
+--
+-- Dlaczego: od 30.10.2026 nowe tabele w `public` NIE dostaja juz automatycznie
+-- uprawnien dla anon / authenticated / service_role. Bez GRANT Data API
+-- (REST, GraphQL, supabase-js, fetch na /rest/v1) zwraca blad 42501, zanim RLS
+-- w ogole zadziala. Dotyczy tez service_role: BYPASSRLS omija polityki, ale NIE
+-- omija braku GRANT. Istniejace tabele zachowuja swoje uprawnienia.
+-- Zrodlo: https://supabase.com/changelog/45329-breaking-change-tables-not-exposed-to-data-and-graphql-api-automatically
+--
+-- Zasada: GRANT tylko tego, czego rola naprawde uzywa. Nazwy kolumn w GRANT
+-- (kolumnowych) i w kodzie INSERT sprawdzaj z tym plikiem, nie z pamieci.
+-- =============================================================================
+
+create table if not exists public.nowa_tabela (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now()
+  -- , pozostale kolumny
+);
+
+-- 1. RLS zawsze wlaczone. Bez polityk = anon/authenticated nie widza wierszy.
+alter table public.nowa_tabela enable row level security;
+
+-- 2. GRANT: wybierz JEDEN wariant (albo ich polaczenie) i usun reszte.
+
+-- Wariant A: tylko backend (Vercel /api, LeadForge, n8n) z SUPABASE_SERVICE_ROLE_KEY.
+-- Najczestszy w CFG (dachprotect, ai-visibility-report). anon/authenticated bez dostepu.
+grant select, insert, update, delete on public.nowa_tabela to service_role;
+
+-- Wariant B: formularz w przegladarce zapisuje kluczem anon (EV Protect, cfg-digital-www).
+-- grant insert on public.nowa_tabela to anon;
+-- grant select, insert, update, delete on public.nowa_tabela to service_role;
+-- create policy "anon_insert_nowa_tabela" on public.nowa_tabela
+--   for insert to anon with check (true);
+
+-- Wariant C: zalogowani uzytkownicy widza swoje wiersze (wacrm i podobne).
+-- grant select, insert, update, delete on public.nowa_tabela to authenticated;
+-- grant select, insert, update, delete on public.nowa_tabela to service_role;
+-- create policy "own_rows_select" on public.nowa_tabela
+--   for select to authenticated using (auth.uid() = user_id);
+
+-- 3. Sekwencje: tylko jesli tabela ma kolumne serial/bigserial (nie dotyczy
+--    uuid ani `generated ... as identity`). Rola, ktora robi INSERT, potrzebuje:
+-- grant usage, select on sequence public.nowa_tabela_id_seq to service_role;
+
+-- 4. Widoki tez sa nowymi obiektami: kazdy nowy `create view` w public wymaga
+--    osobnego GRANT dla roli, ktora go czyta, np.:
+-- grant select on public.nowa_tabela_widok to service_role;
+
+-- 5. Kontrola po wdrozeniu (SQL Editor, tylko odczyt):
+-- select r.rolname,
+--        has_table_privilege(r.rolname, 'public.nowa_tabela', 'SELECT') as sel,
+--        has_table_privilege(r.rolname, 'public.nowa_tabela', 'INSERT') as ins
+-- from pg_roles r where r.rolname in ('anon', 'authenticated', 'service_role');
