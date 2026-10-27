@@ -29,10 +29,10 @@ alter table public.nowa_tabela enable row level security;
 -- 2. GRANT: wybierz JEDEN wariant (albo ich polaczenie) i usun reszte.
 
 -- Wariant A: tylko backend (Vercel /api, LeadForge, n8n) z SUPABASE_SERVICE_ROLE_KEY.
--- Najczestszy w CFG (dachprotect, ai-visibility-report). anon/authenticated bez dostepu.
+-- Najczestszy wariant (zapis tylko z backendu). anon/authenticated bez dostepu.
 grant select, insert, update, delete on public.nowa_tabela to service_role;
 
--- Wariant B: formularz w przegladarce zapisuje kluczem anon (EV Protect, cfg-digital-www).
+-- Wariant B: formularz w przegladarce zapisuje kluczem anon.
 -- grant insert on public.nowa_tabela to anon;
 -- grant select, insert, update, delete on public.nowa_tabela to service_role;
 -- create policy "anon_insert_nowa_tabela" on public.nowa_tabela
