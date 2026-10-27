@@ -143,6 +143,8 @@ API config, and production deploy — lives at
 **[wacrm.tech/docs](https://wacrm.tech/docs)**
 (source: [ArnasDon/wacrm-site](https://github.com/ArnasDon/wacrm-site)).
 
+> **Note (Supabase, 30.10.2026):** new `public` tables no longer get automatic grants. The migrations here rely on the old defaults, so a fresh project needs explicit `GRANT` per table (pattern: `supabase/migrations/_TEMPLATE-nowa-tabela.sql.example`).
+
 Key pages:
 - [Getting started](https://wacrm.tech/docs/getting-started)
 - [Supabase setup](https://wacrm.tech/docs/supabase-setup)
